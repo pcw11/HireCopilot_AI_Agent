@@ -194,7 +194,7 @@ def interview_row(payload: dict) -> list:
         scores.get("ownership", ""),
         scores.get("communication", ""),
         scores.get("learning_agility", ""),
-        scores.get("summary") or "",
+        payload.get("summary") or "",
         payload.get("recommended_next_step") or "",
         payload.get("transcript") or "",
     ]
@@ -453,6 +453,8 @@ def retry_failed_outbox(result: PipelineResult, webhook_url: str | None = None) 
     new_results = list(result.action_results)
     for i, action in enumerate(result.actions):
         prev = new_results[i] if i < len(new_results) else ("", False, "")
+        if action.target == "pipeline_log":
+            continue
         if prev[1]:
             continue
         ok, msg = post_to_gas(action.to_payload(), url)

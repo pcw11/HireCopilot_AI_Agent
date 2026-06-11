@@ -5,6 +5,7 @@ import unittest
 from pipeline import (
     build_branch_actions,
     check_screening,
+    interview_row,
     parse_gpa,
     retry_failed_outbox,
     run_pipeline,
@@ -90,6 +91,10 @@ class TestBranchActions(unittest.TestCase):
 
 
 class TestRunPipeline(unittest.TestCase):
+    def test_interview_row_uses_payload_summary(self):
+        row = interview_row(_base_payload(summary="최상위 요약", scores={"overall": 4.0, "summary": "잘못된 요약"}))
+        self.assertEqual(row[16], "최상위 요약")
+
     def test_skip_interview_save(self):
         result = run_pipeline(_base_payload(), "", skip_outbox=True, skip_interview_save=True)
         self.assertTrue(result.interview_saved[0])
@@ -126,6 +131,34 @@ class TestRunPipeline(unittest.TestCase):
 
         self.assertEqual(calls, ["outbox_email"])
         self.assertTrue(updated.action_results[0][1])
+
+    def test_retry_skips_failed_pipeline_log(self):
+        result = PipelineResult(
+            interview_saved=(True, "ok"),
+            screening_passed=False,
+            screening_reason="fail",
+            branch="filtered",
+            actions=[OutboxAction("pipeline_log", ["t", "n", "b", "p", "d"])],
+            action_results=[("pipeline_log", False, "fail")],
+        )
+
+        calls = []
+
+        def fake_post(payload, url):
+            calls.append(payload["target"])
+            return True, "ok"
+
+        import pipeline as pl
+
+        orig = pl.post_to_gas
+        pl.post_to_gas = fake_post
+        try:
+            updated = retry_failed_outbox(result, "http://fake")
+        finally:
+            pl.post_to_gas = orig
+
+        self.assertEqual(calls, [])
+        self.assertFalse(updated.action_results[0][1])
 
 
 if __name__ == "__main__":

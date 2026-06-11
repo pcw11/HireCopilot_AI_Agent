@@ -22,6 +22,9 @@ dist/
 # Streamlit local state
 .streamlit/secrets.toml
 
+# Local admin-console snapshots
+data/*.jsonl
+
 # OS/editor noise
 .DS_Store
 Thumbs.db

@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 import streamlit as st
 from dotenv import load_dotenv
 
+from admin_store import save_interview_record
 from pipeline import (
     PipelineResult,
     load_pipeline_config,
@@ -941,6 +942,10 @@ if st.session_state.interview_done and st.session_state.final_payload is None:
     st.session_state.final_payload = payload
 
     st.session_state.pipeline_result = execute_pipeline(payload)
+    try:
+        save_interview_record(payload, st.session_state.pipeline_result)
+    except OSError as e:
+        st.warning(f"관리자 콘솔 기록 저장에 실패했습니다: {e}")
     st.rerun()
 
 
