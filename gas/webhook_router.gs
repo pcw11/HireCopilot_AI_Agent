@@ -27,6 +27,16 @@ var SPREADSHEET_ID = "1swaf7dyRsVRxepLJAXVoPO3YRNV0aPYmcBLL4_tPnbE";
 
 var INTERVIEWS_ALIASES = ["interviews", "Sheet1", "시트1"];
 
+/**
+ * Apps Script 편집기에서 이 함수를 한 번 실행하고 권한을 승인하세요.
+ * 웹앱 POST 요청은 권한 팝업을 띄울 수 없어서, MailApp 권한은 배포자가
+ * 편집기에서 먼저 승인해야 합니다.
+ */
+function authorizeHireCopilot_() {
+  SpreadsheetApp.openById(SPREADSHEET_ID).getName();
+  MailApp.getRemainingDailyQuota();
+}
+
 function doPost(e) {
   try {
     var data = JSON.parse(e.postData.contents);
@@ -74,7 +84,7 @@ function sendEmailNow_(row) {
     name: fromName
   });
 
-  return jsonResponse_({ result: "success", target: "send_email_now", to: to });
+  return jsonResponse_({ result: "success", target: "send_email_now", sent: true, to: to });
 }
 
 function buildInterviewRow_(data) {

@@ -213,6 +213,23 @@ def post_to_gas(payload: dict, webhook_url: str) -> tuple[bool, str]:
             if redirect_url:
                 r = requests.get(redirect_url, timeout=15, allow_redirects=True)
         if 200 <= r.status_code < 300:
+            try:
+                data = json.loads(r.text) if r.text else {}
+            except json.JSONDecodeError:
+                data = {}
+
+            if isinstance(data, dict) and data.get("result") == "error":
+                return False, f"GAS 오류: {data.get('message', r.text[:300])}"
+
+            if payload.get("target") == "send_email_now":
+                if isinstance(data, dict) and data.get("sent") is True:
+                    return True, f"즉시 메일 발송 성공 (HTTP {r.status_code})"
+                return (
+                    False,
+                    "GAS가 즉시 발송 완료(sent=true)를 반환하지 않았습니다. "
+                    "Apps Script에 최신 webhook_router.gs를 붙여넣고 새 배포가 필요합니다.",
+                )
+
             return True, f"전송 성공 (HTTP {r.status_code})"
         return False, f"HTTP {r.status_code}: {r.text[:300]}"
     except requests.RequestException as e:

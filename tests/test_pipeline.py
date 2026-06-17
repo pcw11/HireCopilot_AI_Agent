@@ -320,6 +320,63 @@ class TestPostToGas(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("500", msg)
 
+    def test_gas_json_error_reported(self):
+        import pipeline as pl
+
+        class FakeRequests:
+            RequestException = Exception
+
+            @staticmethod
+            def post(url, json=None, timeout=None, allow_redirects=None):
+                return _FakeResponse(200, text='{"result":"error","message":"mail quota exceeded"}')
+
+        orig = self._with_fake_requests(FakeRequests)
+        try:
+            ok, msg = pl.post_to_gas({"target": "send_email_now", "row": []}, "http://gas")
+        finally:
+            pl.requests = orig
+
+        self.assertFalse(ok)
+        self.assertIn("mail quota exceeded", msg)
+
+    def test_send_email_now_requires_sent_confirmation(self):
+        import pipeline as pl
+
+        class FakeRequests:
+            RequestException = Exception
+
+            @staticmethod
+            def post(url, json=None, timeout=None, allow_redirects=None):
+                return _FakeResponse(200, text='{"result":"success","target":"send_email_now"}')
+
+        orig = self._with_fake_requests(FakeRequests)
+        try:
+            ok, msg = pl.post_to_gas({"target": "send_email_now", "row": []}, "http://gas")
+        finally:
+            pl.requests = orig
+
+        self.assertFalse(ok)
+        self.assertIn("새 배포", msg)
+
+    def test_send_email_now_success_requires_sent_true(self):
+        import pipeline as pl
+
+        class FakeRequests:
+            RequestException = Exception
+
+            @staticmethod
+            def post(url, json=None, timeout=None, allow_redirects=None):
+                return _FakeResponse(200, text='{"result":"success","target":"send_email_now","sent":true}')
+
+        orig = self._with_fake_requests(FakeRequests)
+        try:
+            ok, msg = pl.post_to_gas({"target": "send_email_now", "row": []}, "http://gas")
+        finally:
+            pl.requests = orig
+
+        self.assertTrue(ok)
+        self.assertIn("즉시 메일", msg)
+
 
 class TestRunPipeline(unittest.TestCase):
     def test_interview_row_uses_payload_summary(self):
