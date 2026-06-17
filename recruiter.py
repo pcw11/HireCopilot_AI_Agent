@@ -31,6 +31,8 @@ from pipeline import (
 load_dotenv(override=True)
 
 RECRUITER_PASSWORD = os.getenv("RECRUITER_PASSWORD", "").strip()
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 RECRUITER_CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "recruiter_config.json")
 
 DEFAULT_POSITIONS = [
@@ -141,7 +143,7 @@ def _scheduled_action_row(record: dict) -> list | None:
     return None
 
 
-def _record_sort_score(record: dict) -> tuple[int, float]:
+def candidate_priority_key(record: dict) -> tuple[int, float]:
     payload = record.get("payload") or {}
     result = record.get("pipeline_result") or {}
     opinion = payload.get("hiring_opinion")
@@ -163,7 +165,7 @@ def _record_sort_score(record: dict) -> tuple[int, float]:
     return priority, -overall
 
 
-def _record_action_label(record: dict) -> str:
+def candidate_action_label(record: dict) -> str:
     payload = record.get("payload") or {}
     result = record.get("pipeline_result") or {}
     opinion = payload.get("hiring_opinion")
@@ -185,7 +187,7 @@ def _record_table_row(record: dict) -> dict:
     result = record.get("pipeline_result") or {}
     scores = payload.get("scores") or {}
     return {
-        "처리": _record_action_label(record),
+        "처리": candidate_action_label(record),
         "일시": (payload.get("timestamp") or record.get("recorded_at") or "")[:16],
         "이름": payload.get("candidate_name", ""),
         "포지션": payload.get("position", ""),
@@ -194,6 +196,100 @@ def _record_table_row(record: dict) -> dict:
         "자격": "통과" if result.get("screening_passed") else "미달",
         "알림": "실패" if failed_outbox_count(record) else "정상",
     }
+
+
+def candidate_brief(record: dict) -> dict:
+    payload = record.get("payload") or {}
+    result = record.get("pipeline_result") or {}
+    scores = payload.get("scores") or {}
+    return {
+        "name": payload.get("candidate_name", ""),
+        "email": payload.get("candidate_email", ""),
+        "position": payload.get("position", ""),
+        "opinion": payload.get("hiring_opinion", ""),
+        "overall": scores.get("overall", ""),
+        "screening": "pass" if result.get("screening_passed") else "fail",
+        "screening_reason": result.get("screening_reason", ""),
+        "summary": payload.get("summary", ""),
+        "reason": payload.get("hiring_recommendation_reason", ""),
+        "strengths": payload.get("strengths") or [],
+        "concerns": payload.get("concerns") or [],
+        "next_step": payload.get("recommended_next_step", ""),
+        "action": candidate_action_label(record),
+    }
+
+
+def fallback_priority_report(records: list[dict]) -> str:
+    if not records:
+        return "면접 기록이 없어 리포트를 생성할 수 없습니다."
+
+    ranked = sorted(records, key=candidate_priority_key)
+    lines = [
+        "## AI 후보자 우선순위 리포트",
+        "",
+        "OpenAI 호출 없이 저장된 평가 점수와 채용 의견을 기준으로 만든 규칙 기반 리포트입니다.",
+        "",
+        "### 먼저 확인할 후보자",
+    ]
+    for idx, record in enumerate(ranked[:5], start=1):
+        brief = candidate_brief(record)
+        lines.append(
+            f"{idx}. **{brief['name'] or '이름 없음'}** · {brief['position'] or '-'} · "
+            f"{_opinion_badge(brief['opinion'])} · 점수 {brief['overall'] or '-'}"
+        )
+        lines.append(f"   - 처리: {brief['action']}")
+        if brief["reason"]:
+            lines.append(f"   - 판단 이유: {brief['reason']}")
+        if brief["concerns"]:
+            lines.append(f"   - 확인 필요: {', '.join(str(c) for c in brief['concerns'][:3])}")
+
+    lines.extend(["", "### 운영 메모"])
+    failed = [r for r in records if failed_outbox_count(r)]
+    holds = [r for r in records if (r.get("payload") or {}).get("hiring_opinion") == "보류"]
+    recommended = [r for r in records if (r.get("payload") or {}).get("hiring_opinion") == "추천"]
+    lines.append(f"- 추천 후보 {len(recommended)}명, 보류 후보 {len(holds)}명입니다.")
+    lines.append(f"- 알림 재전송이 필요한 기록은 {len(failed)}건입니다.")
+    lines.append("- 보류 후보는 2차 면접 질문과 Zoom 생성 여부를 함께 확인하세요.")
+    return "\n".join(lines)
+
+
+def _build_ai_report_prompt(records: list[dict], max_candidates: int = 12) -> str:
+    briefs = [candidate_brief(record) for record in sorted(records, key=candidate_priority_key)[:max_candidates]]
+    return (
+        "당신은 채용 담당자를 돕는 한국어 HR 분석가입니다.\n"
+        "아래 AI 면접 결과 목록을 비교해 관리자용 우선순위 리포트를 작성하세요.\n"
+        "형식은 Markdown으로 작성하고, 과장하지 말고 기록에 근거하세요.\n\n"
+        "반드시 포함할 섹션:\n"
+        "1. 먼저 검토할 후보자 Top 3\n"
+        "2. 후보자별 강점과 리스크\n"
+        "3. 2차 면접에서 확인할 질문\n"
+        "4. 오늘 관리자 액션 체크리스트\n\n"
+        f"후보자 데이터 JSON:\n{json.dumps(briefs, ensure_ascii=False, indent=2)}"
+    )
+
+
+def generate_priority_report(records: list[dict], *, use_openai: bool = True) -> tuple[str, str]:
+    if not records:
+        return "면접 기록이 없어 리포트를 생성할 수 없습니다.", "empty"
+    if not use_openai or not OPENAI_API_KEY:
+        return fallback_priority_report(records), "fallback"
+
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        resp = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "당신은 채용 운영을 돕는 신중한 HR 분석가입니다."},
+                {"role": "user", "content": _build_ai_report_prompt(records)},
+            ],
+            temperature=0.2,
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        return text or fallback_priority_report(records), "openai"
+    except Exception as e:
+        return f"{fallback_priority_report(records)}\n\n> OpenAI 리포트 생성 실패: {type(e).__name__}: {e}", "fallback_error"
 
 
 def _unique_positions(records: list[dict]) -> list[str]:
@@ -498,7 +594,7 @@ def render_dashboard(records: list[dict]) -> None:
     if records:
         st.divider()
         st.markdown("**지금 확인할 항목**")
-        focus_records = sorted(records, key=_record_sort_score)[:6]
+        focus_records = sorted(records, key=candidate_priority_key)[:6]
         st.dataframe(
             [_record_table_row(record) for record in focus_records],
             use_container_width=True,
@@ -560,6 +656,59 @@ def render_interviews(records: list[dict]) -> None:
         key="interview_detail_select",
     )
     _render_record_detail(selected)
+
+
+def render_ai_report(records: list[dict]) -> None:
+    st.markdown("### AI 후보자 우선순위 리포트")
+    st.caption("저장된 면접 결과를 비교해 관리자가 먼저 볼 후보자와 확인 질문을 정리합니다.")
+
+    if not records:
+        st.info("면접 기록이 쌓이면 AI 리포트를 만들 수 있습니다.")
+        return
+
+    filtered = _render_record_filters(records, "ai")
+    if not filtered:
+        st.warning("필터 조건에 맞는 기록이 없습니다.")
+        return
+
+    col_a, col_b, col_c = st.columns(3)
+    col_a.metric("분석 대상", len(filtered))
+    col_b.metric("추천", sum(1 for r in filtered if (r.get("payload") or {}).get("hiring_opinion") == "추천"))
+    col_c.metric("보류", sum(1 for r in filtered if (r.get("payload") or {}).get("hiring_opinion") == "보류"))
+
+    use_openai = st.checkbox(
+        "OpenAI로 리포트 생성",
+        value=bool(OPENAI_API_KEY),
+        help="키가 없거나 호출에 실패하면 규칙 기반 리포트로 대체됩니다.",
+    )
+
+    if st.button("리포트 생성", type="primary", use_container_width=True):
+        report, mode = generate_priority_report(filtered, use_openai=use_openai)
+        st.session_state["ai_priority_report"] = report
+        st.session_state["ai_priority_mode"] = mode
+
+    report = st.session_state.get("ai_priority_report")
+    if not report:
+        report, mode = generate_priority_report(filtered, use_openai=False)
+        st.session_state["ai_priority_report"] = report
+        st.session_state["ai_priority_mode"] = mode
+
+    mode = st.session_state.get("ai_priority_mode", "fallback")
+    if mode == "openai":
+        st.success(f"OpenAI 모델 `{OPENAI_MODEL}`로 생성했습니다.")
+    elif mode == "fallback_error":
+        st.warning("OpenAI 호출에 실패해 규칙 기반 리포트를 표시합니다.")
+    elif mode == "fallback":
+        st.info("규칙 기반 리포트를 표시합니다. OpenAI 키가 있으면 더 자연스러운 분석을 생성할 수 있습니다.")
+
+    st.markdown(report)
+    st.download_button(
+        "리포트 다운로드",
+        data=report,
+        file_name="hirecopilot_priority_report.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
 
 
 def render_final_review_queue(records: list[dict]) -> None:
@@ -1085,6 +1234,7 @@ def render_recruiting_settings(config: dict) -> None:
 _NAV_ITEMS = [
     "대시보드",
     "지원자 관리",
+    "AI 리포트",
     "알림/파이프라인",
     "테스트 도구",
     "설정",
@@ -1189,6 +1339,8 @@ if page == "대시보드":
     render_dashboard(records)
 elif page == "지원자 관리":
     render_interviews(records)
+elif page == "AI 리포트":
+    render_ai_report(records)
 elif page == "알림/파이프라인":
     render_outbox(records)
 elif page == "테스트 도구":

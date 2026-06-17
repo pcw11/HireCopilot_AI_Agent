@@ -7,6 +7,7 @@ import unittest
 
 from admin_store import (
     failed_outbox_count,
+    fallback_priority_report,
     list_interview_records,
     pipeline_result_from_dict,
     save_interview_record,
@@ -152,6 +153,26 @@ class TestAdminStore(unittest.TestCase):
                 path=path,
             )
         self.assertEqual(record["review"]["status"], "pending")
+
+    def test_priority_report_fallback_mentions_top_candidate(self):
+        record = {
+            "payload": {
+                **_payload(candidate_name="김추천", hiring_opinion="추천"),
+                "scores": {"overall": 4.7},
+                "summary": "요약",
+                "hiring_recommendation_reason": "고객 응대 역량 우수",
+                "concerns": ["검증 필요"],
+            },
+            "pipeline_result": {
+                "screening_passed": True,
+                "screening_reason": "통과",
+                "action_results": [],
+            },
+        }
+        report = fallback_priority_report([record])
+
+        self.assertIn("김추천", report)
+        self.assertIn("먼저 확인할 후보자", report)
 
     def test_update_review_status_and_preserve_on_upsert(self):
         with tempfile.TemporaryDirectory() as tmp:
